@@ -1,62 +1,62 @@
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Kết nối Supabase thông qua biến môi trường
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
-);
+// CẤU HÌNH SUPABASE TRỰC TIẾP
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://okfuncwyrjgeqddunzal.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rZnVuY3d5cmpnZXFkZHVuemFsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkyMDg4MjIsImV4cCI6MjEwNDc4NDgyMn0.Dpfz63DUcSRrch88afPz_u3MH9C0m7qeCi-JoU1mi8M';
 
-// 1. Lấy danh sách acc có sẵn (bản nguyên gốc cũ)
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// 1. API LẤY DANH SÁCH TÀI KHOẢN (Đã có image_url để hiển thị 2 ảnh)
 app.get('/api/accounts', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('accounts')
-    .select('id, game_name, price, status, image_url')
-      .eq('status', 'available');
+      .select('id, game_name, price, status, image_url')
+      .eq('status', 'available')
+      .order('id', { ascending: true });
 
     if (error) throw error;
     res.json(data);
   } catch (err) {
+    console.error('Lỗi lấy accounts:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// 2. Tạo đơn hàng mới
+// 2. API TẠO ĐƠN HÀNG
 app.post('/api/create-order', async (req, res) => {
-  const { accountId, customerEmail } = req.body;
-
   try {
-    const { data: acc, error: accErr } = await supabase
+    const { accountId, customerEmail } = req.body;
+
+    const { data: account, error: accErr } = await supabase
       .from('accounts')
       .select('*')
       .eq('id', accountId)
       .eq('status', 'available')
       .single();
 
-    if (accErr || !acc) {
-      return res.status(400).json({ error: 'Tài khoản này không tồn tại hoặc đã bán!' });
+    if (accErr || !account) {
+      return res.status(400).json({ error: 'Tài khoản này vừa có người mua hoặc không tồn tại!' });
     }
 
-    const orderCode = 'DH' + Math.floor(10000 + Math.random() * 90000);
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    const orderCode = `DH${randomSuffix}`;
 
-    const { data: newOrder, error: orderErr } = await supabase
+    const { data: order, error: orderErr } = await supabase
       .from('orders')
       .insert([
         {
           order_code: orderCode,
-          account_id: acc.id,
-          game_name: acc.game_name,
-          account_info: acc.account_info,
-          amount: acc.price,
-          customer_email: customerEmail || 'guest@shop.local',
-          status: 'pending'
+          account_id: account.id,
+          amount: account.price,
+          status: 'pending',
+          customer_email: customerEmail || 'gamer@local.shop'
         }
       ])
       .select()
@@ -65,75 +65,102 @@ app.post('/api/create-order', async (req, res) => {
     if (orderErr) throw orderErr;
 
     res.json({
-      success: true,
-      orderCode: newOrder.order_code,
-      amount: newOrder.amount
+      orderCode: order.order_code,
+      amount: order.amount,
+      gameName: account.game_name
     });
   } catch (err) {
+    console.error('Lỗi tạo đơn:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// 3. Webhook SePay
-app.post('/api/webhook/sepay', async (req, res) => {
-  const { content, transferAmount } = req.body;
-  const match = content && content.match(/DH\d+/i);
-  if (!match) {
-    return res.json({ success: true, message: 'Không tìm thấy mã đơn' });
-  }
-  const orderCode = match[0].toUpperCase();
-
+// 3. API KIỂM TRA TRẠNG THÁI ĐƠN HÀNG (POLLING)
+app.get('/api/order-status/:orderCode', async (req, res) => {
   try {
-    const { data: order, error: findErr } = await supabase
+    const { orderCode } = req.params;
+
+    const { data: order, error: orderErr } = await supabase
       .from('orders')
-      .select('*')
+      .select('status, account_id')
       .eq('order_code', orderCode)
       .single();
 
-    if (order && order.status === 'pending' && transferAmount >= order.amount) {
+    if (orderErr || !order) {
+      return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
+    }
+
+    if (order.status === 'completed') {
+      const { data: account } = await supabase
+        .from('accounts')
+        .select('account_info')
+        .eq('id', order.account_id)
+        .single();
+
+      return res.json({
+        status: 'completed',
+        accountInfo: account ? account.account_info : 'Đã bàn giao tài khoản'
+      });
+    }
+
+    res.json({ status: order.status });
+  } catch (err) {
+    console.error('Lỗi check status:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. WEBHOOK NHẬN TIỀN TỰ ĐỘNG TỪ SEPAY
+app.post('/api/sepay-webhook', async (req, res) => {
+  try {
+    const { content, transferAmount } = req.body;
+    console.log('Sepay Webhook Data:', { content, transferAmount });
+
+    if (!content) return res.json({ success: false, message: 'Thiếu nội dung' });
+
+    const match = content.match(/DH\d{4}/i);
+    if (!match) {
+      return res.json({ success: false, message: 'Nội dung không chứa mã đơn hàng' });
+    }
+
+    const orderCode = match[0].toUpperCase();
+
+    const { data: order, error: orderErr } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('order_code', orderCode)
+      .eq('status', 'pending')
+      .single();
+
+    if (orderErr || !order) {
+      return res.json({ success: false, message: 'Đơn không tồn tại hoặc đã xử lý' });
+    }
+
+    if (Number(transferAmount) >= Number(order.amount)) {
+      // Cập nhật trạng thái đơn hàng thành completed
+      await supabase
+        .from('orders')
+        .update({ status: 'completed' })
+        .eq('id', order.id);
+
+      // Cập nhật tài khoản sang sold (đã bán)
       await supabase
         .from('accounts')
         .update({ status: 'sold' })
         .eq('id', order.account_id);
 
-      await supabase
-        .from('orders')
-        .update({ status: 'completed' })
-        .eq('id', order.id);
+      console.log(`Đã duyệt thành công đơn: ${orderCode}`);
+      return res.json({ success: true });
     }
 
-    res.json({ success: true });
+    res.json({ success: false, message: 'Số tiền chuyển không đủ' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 4. Kiểm tra trạng thái đơn hàng
-app.get('/api/order-status/:orderCode', async (req, res) => {
-  const { orderCode } = req.params;
-
-  try {
-    const { data: order, error } = await supabase
-      .from('orders')
-      .select('status, account_info')
-      .eq('order_code', orderCode.toUpperCase())
-      .single();
-
-    if (error || !order) {
-      return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
-    }
-
-    if (order.status === 'completed') {
-      return res.json({ status: 'completed', accountInfo: order.account_info });
-    }
-
-    res.json({ status: 'pending' });
-  } catch (err) {
+    console.error('Lỗi webhook:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`Server chạy tại port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
