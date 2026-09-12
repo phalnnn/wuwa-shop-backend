@@ -12,7 +12,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6Ik
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// 1. API LẤY DANH SÁCH TÀI KHOẢN (Đã có image_url để hiển thị 2 ảnh)
+// 1. API LẤY DANH SÁCH TÀI KHOẢN CÒN HÀNG
 app.get('/api/accounts', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -22,7 +22,7 @@ app.get('/api/accounts', async (req, res) => {
       .order('id', { ascending: true });
 
     if (error) throw error;
-    res.json(data);
+    res.json(data || []);
   } catch (err) {
     console.error('Lỗi lấy accounts:', err.message);
     res.status(500).json({ error: err.message });
@@ -75,7 +75,7 @@ app.post('/api/create-order', async (req, res) => {
   }
 });
 
-// 3. API KIỂM TRA TRẠNG THÁI ĐƠN HÀNG (POLLING)
+// 3. API KIỂM TRA TRẠNG THÁI ĐƠN HÀNG (POLLING TỪ WEB)
 app.get('/api/order-status/:orderCode', async (req, res) => {
   try {
     const { orderCode } = req.params;
@@ -105,26 +105,40 @@ app.get('/api/order-status/:orderCode', async (req, res) => {
 
     res.json({ status: order.status });
   } catch (err) {
-    console.error('Lỗi check status:', err.message);
+    console.error('Lỗi kiểm tra trạng thái đơn:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// 4. WEBHOOK NHẬN TIỀN TỰ ĐỘNG TỪ SEPAY
+// 4. WEBHOOK NHẬN TIỀN TỰ ĐỘNG TỪ SEPAY (BẮT ĐA DẠNG TRƯỜNG DỮ LIỆU)
 app.post('/api/sepay-webhook', async (req, res) => {
   try {
-    const { content, transferAmount } = req.body;
-    console.log('Sepay Webhook Data:', { content, transferAmount });
+    const body = req.body || {};
+    console.log('>>> [SePay Webhook Received]:', JSON.stringify(body));
 
-    if (!content) return res.json({ success: false, message: 'Thiếu nội dung' });
+    // Lấy nội dung chuyển khoản từ mọi tên biến có thể có
+    const rawContent = body.content || body.description || body.transferContent || body.order_code || '';
+    
+    // Lấy số tiền chuyển khoản từ mọi tên biến có thể có
+    const rawAmount = body.transferAmount || body.amount || body.transfer_amount || body.accumulated || 0;
+    const transferAmount = Number(rawAmount);
 
-    const match = content.match(/DH\d{4}/i);
+    if (!rawContent) {
+      console.warn('Webhook thiếu trường nội dung');
+      return res.status(200).json({ success: false, message: 'Thiếu nội dung giao dịch' });
+    }
+
+    // Trích xuất mã đơn DHxxxx từ nội dung chuyển khoản
+    const match = String(rawContent).match(/DH\d{4}/i);
     if (!match) {
-      return res.json({ success: false, message: 'Nội dung không chứa mã đơn hàng' });
+      console.warn('Không tìm thấy mã đơn dạng DHxxxx trong chuỗi:', rawContent);
+      return res.status(200).json({ success: false, message: 'Nội dung không chứa mã đơn hàng' });
     }
 
     const orderCode = match[0].toUpperCase();
+    console.log(`Tìm thấy mã đơn: ${orderCode} | Số tiền nhận: ${transferAmount}`);
 
+    // Tìm đơn hàng đang chờ thanh toán
     const { data: order, error: orderErr } = await supabase
       .from('orders')
       .select('*')
@@ -133,10 +147,12 @@ app.post('/api/sepay-webhook', async (req, res) => {
       .single();
 
     if (orderErr || !order) {
-      return res.json({ success: false, message: 'Đơn không tồn tại hoặc đã xử lý' });
+      console.warn(`Đơn hàng ${orderCode} không tồn tại hoặc đã xử lý trước đó.`);
+      return res.status(200).json({ success: false, message: 'Đơn không tồn tại hoặc đã xử lý' });
     }
 
-    if (Number(transferAmount) >= Number(order.amount)) {
+    // Đối soát số tiền (cho phép bằng hoặc lớn hơn giá niêm yết)
+    if (transferAmount >= Number(order.amount)) {
       // Cập nhật trạng thái đơn hàng thành completed
       await supabase
         .from('orders')
@@ -149,14 +165,16 @@ app.post('/api/sepay-webhook', async (req, res) => {
         .update({ status: 'sold' })
         .eq('id', order.account_id);
 
-      console.log(`Đã duyệt thành công đơn: ${orderCode}`);
-      return res.json({ success: true });
+      console.log(`>>> GIAO DỊCH THÀNH CÔNG: Đã duyệt đơn hàng ${orderCode} thành công!`);
+      return res.status(200).json({ success: true, message: 'Thành công' });
+    } else {
+      console.warn(`Số tiền chưa đủ: Yêu cầu ${order.amount}, nhận được ${transferAmount}`);
+      return res.status(200).json({ success: false, message: 'Số tiền chuyển không đủ' });
     }
-
-    res.json({ success: false, message: 'Số tiền chuyển không đủ' });
   } catch (err) {
-    console.error('Lỗi webhook:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('Lỗi nghiêm trọng tại webhook:', err.message);
+    // Luôn trả về 200 để SePay không gửi spam lại liên tục khi code gặp lỗi logic
+    res.status(200).json({ success: false, error: err.message });
   }
 });
 
