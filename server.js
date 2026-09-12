@@ -7,25 +7,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Kết nối Supabase
+// Kết nối Supabase thông qua biến môi trường
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
 
-// 1. Lấy danh sách acc có sẵn (bao gồm cả ảnh)
+// 1. Lấy danh sách acc có sẵn (bản nguyên gốc cũ)
 app.get('/api/accounts', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('accounts')
-      .select('id, game_name, price, status, image_url')
-      .eq('status', 'available')
-      .order('id', { ascending: true });
+      .select('id, game_name, price, status')
+      .eq('status', 'available');
 
     if (error) throw error;
     res.json(data);
   } catch (err) {
-    console.error('Lỗi lấy danh sách acc:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -43,7 +41,7 @@ app.post('/api/create-order', async (req, res) => {
       .single();
 
     if (accErr || !acc) {
-      return res.status(400).json({ error: 'Tài khoản này vừa có người mua hoặc không tồn tại!' });
+      return res.status(400).json({ error: 'Tài khoản này không tồn tại hoặc đã bán!' });
     }
 
     const orderCode = 'DH' + Math.floor(10000 + Math.random() * 90000);
@@ -72,7 +70,6 @@ app.post('/api/create-order', async (req, res) => {
       amount: newOrder.amount
     });
   } catch (err) {
-    console.error('Lỗi tạo đơn hàng:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -80,11 +77,9 @@ app.post('/api/create-order', async (req, res) => {
 // 3. Webhook SePay
 app.post('/api/webhook/sepay', async (req, res) => {
   const { content, transferAmount } = req.body;
-  console.log(`[Webhook SePay] Nhận: ${transferAmount}đ | Nội dung: "${content}"`);
-
   const match = content && content.match(/DH\d+/i);
   if (!match) {
-    return res.json({ success: true, message: 'Nội dung không chứa mã đơn hàng' });
+    return res.json({ success: true, message: 'Không tìm thấy mã đơn' });
   }
   const orderCode = match[0].toUpperCase();
 
@@ -105,18 +100,15 @@ app.post('/api/webhook/sepay', async (req, res) => {
         .from('orders')
         .update({ status: 'completed' })
         .eq('id', order.id);
-
-      console.log(`[Thành công] Đã giao tài khoản đơn ${orderCode}!`);
     }
 
     res.json({ success: true });
   } catch (err) {
-    console.error('Lỗi xử lý webhook:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// 4. Kiểm tra trạng thái đơn
+// 4. Kiểm tra trạng thái đơn hàng
 app.get('/api/order-status/:orderCode', async (req, res) => {
   const { orderCode } = req.params;
 
@@ -143,5 +135,5 @@ app.get('/api/order-status/:orderCode', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`Server đang chạy ở port ${PORT}`);
+  console.log(`Server chạy tại port ${PORT}`);
 });
