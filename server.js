@@ -18,7 +18,7 @@ app.get('/api/accounts', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('accounts')
-      .select('id, game_name, price, status')
+    .select('id, game_name, price, status, image_url')
       .eq('status', 'available');
 
     if (error) throw error;
